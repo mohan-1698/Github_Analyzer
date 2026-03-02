@@ -1,8 +1,12 @@
 """
 GitHub Growth Analyzer Backend
 
-Phase 2 & 3: FastAPI + GitHub OAuth Implementation
-SECURITY HARDENED: Rate limiting, CSRF, HTTPS, Audit logging
+Phase 2 & 3: FastAPI + GitHub OAuth Implementation (DONE)
+Phase 4: GitHub API Service (DONE)
+Phase 5: Analytics Engine (DONE)
+Phase 6: AI Layer (DONE)
+
+SECURITY HARDENED: Rate limiting, CSRF, HTTPS, Audit logging, Refresh tokens
 """
 
 from fastapi import FastAPI, HTTPException, Depends, Request
@@ -21,6 +25,12 @@ import uuid
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+
+# Phase 4, 5, 6 imports - Updated paths for new folder structure
+from github.github_service import GitHubService
+from analytics.analytics_engine import AnalyticsEngine
+from ai.openai_service import get_ai_insights  # Now uses Google Gemini
+from database.firebase_service import firebase_db  # Firestore database
 
 # Load environment variables
 load_dotenv()
@@ -83,16 +93,17 @@ app.add_middleware(
 )
 
 # ============================================================================
-# IN-MEMORY STORAGE (SECURITY: Will move to database)
+# FIRESTORE DATABASE (All data persisted)
 # ============================================================================
 
-# Store CSRF state: {state_token -> {user_ip, created_at}}
+# Sessions stored in Firestore (not in memory)
+# CSRF states still kept in memory (short-lived, 10min expiry)
 csrf_states: dict = {}
 
-# Store sessions: {jwt_token -> {user_data, created_at}}
-sessions_db: dict = {}
 
-
+# ============================================================================
+# GITHUB OAUTH SERVICE
+# ============================================================================
 class GitHubOAuthService:
     """
     GitHub OAuth Service with Security Hardening
@@ -396,32 +407,37 @@ async def github_callback(request: Request, code: str = None, state: str = None)
     # Step 3: Create token pair (access + refresh)
     jwt_access_token, jwt_refresh_token = GitHubOAuthService.create_jwt_token(user_profile)
     
-    # Step 4: Store session with both tokens
+    # Step 4: Store session in Firestore
     session_id = str(uuid.uuid4())
-    sessions_db[session_id] = {
+    session_data = {
         "user_id": user_profile.get("id"),
         "login": user_profile.get("login"),
         "avatar_url": user_profile.get("avatar_url"),
         "github_access_token": access_token,  # GitHub API token
         "jwt_access_token": jwt_access_token,  # Current access token
         "jwt_refresh_token": jwt_refresh_token,  # For refreshing access token
-        "created_at": datetime.utcnow().isoformat(),
         "ip_address": request.client.host,
         "is_valid": True  # Can be set to False to revoke
     }
+    
+    # Save to Firestore (async, doesn't block response)
+    success = await firebase_db.create_session(session_id, session_data)
+    
+    if not success:
+        logger.error(f"Failed to save session to Firestore for {user_profile.get('login')}")
     
     logger.info(f"User authenticated: {user_profile.get('login')} from IP: {request.client.host}")
     
     # Step 5: Redirect to frontend with both tokens
     # In frontend: extract tokens from URL, store them securely
-    params = f"?access_token={jwt_access_token}&refresh_token={jwt_refresh_token}"
+    params = f"?access_token={jwt_access_token}&refresh_token={jwt_refresh_token}&session_id={session_id}"
     frontend_redirect = f"{FRONTEND_URL}/auth/success{params}"
     return RedirectResponse(url=frontend_redirect)
 
 
 @app.get("/auth/user")
 @limiter.limit("30/minute")  # SECURITY 2: Rate limit - max 30 requests/minute
-async def get_current_user(request: Request, access_token: str = None):
+async def get_current_user(request: Request, access_token: str = None, session_id: str = None):
     """
     Protected route: Get current user info
     SECURITY: Validates ACCESS token (15 min lifetime)
@@ -431,6 +447,10 @@ async def get_current_user(request: Request, access_token: str = None):
         logger.warning(f"Missing access token from IP: {request.client.host}")
         raise HTTPException(status_code=401, detail="Missing access token")
     
+    if not session_id:
+        logger.warning(f"Missing session_id from IP: {request.client.host}")
+        raise HTTPException(status_code=401, detail="Missing session_id")
+    
     # SECURITY: Verify it's a valid ACCESS token
     payload = GitHubOAuthService.validate_access_token(access_token)
     
@@ -438,23 +458,23 @@ async def get_current_user(request: Request, access_token: str = None):
         logger.warning(f"Invalid/expired access token attempt from IP: {request.client.host}")
         raise HTTPException(status_code=401, detail="Invalid or expired access token")
     
-    user_id = payload.get("user_id")
-    
-    # Find session by access token
-    session = None
-    for session_data in sessions_db.values():
-        if session_data.get("jwt_access_token") == access_token:
-            session = session_data
-            break
+    # Retrieve session from Firestore
+    session = await firebase_db.get_session(session_id)
     
     if not session:
-        logger.warning(f"Session not found for valid token from IP: {request.client.host}")
+        logger.warning(f"Session not found in Firestore: {session_id}")
         raise HTTPException(status_code=401, detail="Session not found")
+    
+    # Verify access token matches
+    if session.get("jwt_access_token") != access_token:
+        logger.warning(f"Access token mismatch for session {session_id}")
+        raise HTTPException(status_code=401, detail="Invalid access token for session")
     
     if not session.get("is_valid"):
         logger.warning(f"Session revoked for user {payload.get('login')} from IP: {request.client.host}")
         raise HTTPException(status_code=401, detail="Session has been revoked")
     
+    user_id = payload.get("user_id")
     logger.info(f"User accessed profile: {payload.get('login')} from IP: {request.client.host}")
     
     return {
@@ -490,15 +510,8 @@ async def refresh_access_token(request: Request, refresh_token: str = None):
     user_id = payload.get("user_id")
     user_login = payload.get("login")
     
-    # Find session by refresh token
-    session_id = None
-    session = None
-    
-    for sid, session_data in sessions_db.items():
-        if session_data.get("jwt_refresh_token") == refresh_token:
-            session_id = sid
-            session = session_data
-            break
+    # Find session by refresh token in Firestore
+    session_id, session = await firebase_db.find_session_by_refresh_token(refresh_token)
     
     if not session:
         logger.warning(f"Session not found for refresh token from IP: {request.client.host}")
@@ -524,11 +537,18 @@ async def refresh_access_token(request: Request, refresh_token: str = None):
     
     new_access_token = jwt.encode(new_access_payload, JWT_SECRET, algorithm="HS256")
     
-    # Update session with new access token
-    session["jwt_access_token"] = new_access_token
-    session["last_refreshed_at"] = now.isoformat()
+    # Update session in Firestore with new access token
+    success = await firebase_db.update_session(session_id, {
+        "jwt_access_token": new_access_token,
+        "last_refreshed_at": now.isoformat()
+    })
+    
+    if not success:
+        logger.error(f"Failed to update session in Firestore after refresh")
+        raise HTTPException(status_code=500, detail="Failed to update session")
     
     logger.info(f"Access token refreshed for user {user_login} from IP: {request.client.host}")
+
     
     return {
         "access_token": new_access_token,
@@ -540,33 +560,310 @@ async def refresh_access_token(request: Request, refresh_token: str = None):
 
 @app.post("/auth/logout")
 @limiter.limit("10/minute")  # SECURITY 2: Rate limit - max 10 requests/minute
-async def logout(request: Request, access_token: str = None):
+async def logout(request: Request, access_token: str = None, session_id: str = None):
     """
     Logout: Revoke session and invalidate tokens
     SECURITY: Rate limited, audit logged, marks session as invalid
     """
     
-    if not access_token:
-        raise HTTPException(status_code=400, detail="Missing access token")
+    if not access_token or not session_id:
+        raise HTTPException(status_code=400, detail="Missing access token or session_id")
     
-    # Find and invalidate session
-    session_id = None
-    session = None
-    
-    for sid, session_data in sessions_db.items():
-        if session_data.get("jwt_access_token") == access_token:
-            session_id = sid
-            session = session_data
-            break
+    # Retrieve and invalidate session in Firestore
+    session = await firebase_db.get_session(session_id)
     
     if session:
-        user_login = session.get("login")
-        session["is_valid"] = False  # Mark as revoked
-        logger.info(f"User logged out: {user_login} from IP: {request.client.host}")
+        # Verify the access token matches
+        if session.get("jwt_access_token") != access_token:
+            logger.warning(f"Token mismatch during logout for session {session_id}")
+            raise HTTPException(status_code=401, detail="Invalid token for session")
+        
+        # Mark session as revoked
+        success = await firebase_db.update_session(session_id, {"is_valid": False})
+        
+        if success:
+            user_login = session.get("login")
+            logger.info(f"User logged out: {user_login} from IP: {request.client.host}")
+        else:
+            logger.error(f"Failed to revoke session {session_id}")
+            raise HTTPException(status_code=500, detail="Failed to logout")
     else:
-        logger.warning(f"Logout attempt with invalid token from IP: {request.client.host}")
+        logger.warning(f"Logout attempt with invalid session_id from IP: {request.client.host}")
+        raise HTTPException(status_code=401, detail="Session not found")
     
     return {"status": "logged out"}
+
+
+# ============================================================================
+# PHASE 4: GITHUB DATA FETCHING
+# ============================================================================
+
+@app.post("/github/sync")
+@limiter.limit("5/minute")  # SECURITY: Rate limited
+async def sync_github_data(request: Request, access_token: str = None, session_id: str = None):
+    """
+    PHASE 4: Fetch all GitHub data
+    Fetches: repos, commits, PRs, languages
+    SECURITY: Validates token, uses GitHub access_token, timeout protection
+    """
+    
+    if not access_token or not session_id:
+        logger.warning(f"Missing access token or session_id from IP: {request.client.host}")
+        raise HTTPException(status_code=401, detail="Missing access token or session_id")
+    
+    # Validate access token
+    payload = GitHubOAuthService.validate_access_token(access_token)
+    
+    if not payload:
+        logger.warning(f"Invalid access token from IP: {request.client.host}")
+        raise HTTPException(status_code=401, detail="Invalid access token")
+    
+    user_id = payload.get("user_id")
+    user_login = payload.get("login")
+    
+    # Get session from Firestore
+    session = await firebase_db.get_session(session_id)
+    
+    if not session:
+        logger.warning(f"Session not found for {user_login}")
+        raise HTTPException(status_code=401, detail="Session not found")
+    
+    # Verify access token matches
+    if session.get("jwt_access_token") != access_token:
+        logger.warning(f"Access token mismatch for session {session_id}")
+        raise HTTPException(status_code=401, detail="Invalid access token for session")
+    
+    github_token = session.get("github_access_token")
+    
+    if not github_token:
+        logger.error(f"No GitHub token found for {user_login}")
+        raise HTTPException(status_code=500, detail="GitHub token not found")
+    
+    try:
+        logger.info(f"Starting GitHub data sync for {user_login}")
+        
+        # Fetch all GitHub data in parallel (more efficient)
+        repos = await GitHubService.get_user_repos(github_token)
+        commits = await GitHubService.get_user_commits(github_token, days=90)
+        prs = await GitHubService.get_user_pull_requests(github_token, days=90)
+        profile = await GitHubService.get_user_profile_stats(github_token)
+        
+        # Prepare data to store
+        github_data = {
+            "github_data": {
+                "repos": repos or [],
+                "commits": commits or [],
+                "prs": prs or [],
+                "profile": profile or {},
+                "synced_at": datetime.utcnow().isoformat()
+            }
+        }
+        
+        # Update session in Firestore
+        success = await firebase_db.update_session(session_id, github_data)
+        
+        if not success:
+            logger.error(f"Failed to update session with GitHub data")
+            raise HTTPException(status_code=500, detail="Failed to save GitHub data")
+        
+        logger.info(f"GitHub data synced for {user_login}: {len(repos or [])} repos, {len(commits or [])} commits")
+        
+        return {
+            "status": "synced",
+            "repos_count": len(repos or []),
+            "commits_count": len(commits or []),
+            "prs_count": len(prs or []),
+            "synced_at": datetime.utcnow().isoformat()
+        }
+    
+    except Exception as e:
+        logger.error(f"Error syncing GitHub data: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to sync GitHub data")
+
+
+# ============================================================================
+# PHASE 5: ANALYTICS ENGINE
+# ============================================================================
+
+@app.post("/analytics/calculate")
+@limiter.limit("10/minute")  # SECURITY: Rate limited
+async def calculate_analytics(request: Request, access_token: str = None, session_id: str = None):
+    """
+    PHASE 5: Calculate analytics from GitHub data
+    Calculates: commits, streaks, languages, PRs, productivity score
+    SECURITY: Validates token, pure Python calculations
+    """
+    
+    if not access_token or not session_id:
+        raise HTTPException(status_code=401, detail="Missing access token or session_id")
+    
+    # Validate token
+    payload = GitHubOAuthService.validate_access_token(access_token)
+    
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid access token")
+    
+    user_login = payload.get("login")
+    user_id = payload.get("user_id")
+    
+    # Get session from Firestore
+    session = await firebase_db.get_session(session_id)
+    
+    if not session:
+        raise HTTPException(status_code=401, detail="Session not found")
+    
+    # Verify token
+    if session.get("jwt_access_token") != access_token:
+        raise HTTPException(status_code=401, detail="Invalid access token for session")
+    
+    github_data = session.get("github_data")
+    
+    if not github_data:
+        logger.warning(f"No synced GitHub data for {user_login}")
+        raise HTTPException(status_code=400, detail="Must call /github/sync first")
+    
+    try:
+        logger.info(f"Calculating analytics for {user_login}")
+        
+        # Calculate all metrics
+        metrics = AnalyticsEngine.aggregate_all_metrics(
+            commits=github_data.get("commits", []),
+            repos=github_data.get("repos", []),
+            pull_requests=github_data.get("prs", [])
+        )
+        
+        # Save analytics to Firestore (for history tracking)
+        await firebase_db.save_analytics(user_id, metrics)
+        
+        # Also update session
+        await firebase_db.update_session(session_id, {"analytics": metrics})
+        
+        logger.info(f"Analytics calculated for {user_login}: Score {metrics.get('productivity', {}).get('score')}")
+        
+        return metrics
+    
+    except Exception as e:
+        logger.error(f"Error calculating analytics: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to calculate analytics")
+
+
+# ============================================================================
+# PHASE 6: AI INSIGHTS
+# ============================================================================
+
+@app.post("/insights/generate")
+@limiter.limit("3/minute")  # SECURITY: Rate limited (API calls cost!)
+async def generate_ai_insights(request: Request, access_token: str = None, session_id: str = None):
+    """
+    PHASE 6: Generate AI-powered insights using Google Gemini
+    Uses Gemini to provide: productivity analysis, burnout risk, improvement plan
+    SECURITY: Validates token, structured JSON output, API key from environment
+    """
+    
+    if not access_token or not session_id:
+        raise HTTPException(status_code=401, detail="Missing access token or session_id")
+    
+    # Validate token
+    payload = GitHubOAuthService.validate_access_token(access_token)
+    
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid access token")
+    
+    user_login = payload.get("login")
+    user_id = payload.get("user_id")
+    
+    # Get session from Firestore
+    session = await firebase_db.get_session(session_id)
+    
+    if not session:
+        raise HTTPException(status_code=401, detail="Session not found")
+    
+    # Verify token
+    if session.get("jwt_access_token") != access_token:
+        raise HTTPException(status_code=401, detail="Invalid access token for session")
+    
+    analytics = session.get("analytics")
+    
+    if not analytics:
+        logger.warning(f"No analytics for {user_login}")
+        raise HTTPException(status_code=400, detail="Must call /analytics/calculate first")
+    
+    # Get Google Gemini API key
+    gemini_api_key = os.getenv("GEMINI_API_KEY")
+    
+    if not gemini_api_key:
+        logger.error("Gemini API key not configured")
+        raise HTTPException(status_code=500, detail="AI service not configured")
+    
+    try:
+        logger.info(f"Generating AI insights for {user_login} using Gemini")
+        
+        # Generate insights
+        insights = await get_ai_insights(analytics, user_login, gemini_api_key)
+        
+        if not insights:
+            logger.error(f"Failed to generate insights for {user_login}")
+            raise HTTPException(status_code=500, detail="Failed to generate insights")
+        
+        # Save to Firestore (for history)
+        await firebase_db.save_insights(user_id, insights)
+        
+        # Update session
+        await firebase_db.update_session(session_id, {"insights": insights})
+        
+        logger.info(f"AI insights generated for {user_login}")
+        
+        return insights
+    
+    except Exception as e:
+        logger.error(f"Error generating insights: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to generate AI insights")
+
+
+@app.get("/dashboard/data")
+@limiter.limit("20/minute")  # SECURITY: Rate limited
+async def get_dashboard_data(request: Request, access_token: str = None, session_id: str = None):
+    """
+    GET complete dashboard data (GitHub + Analytics + Insights)
+    All data in one response for frontend
+    """
+    
+    if not access_token or not session_id:
+        raise HTTPException(status_code=401, detail="Missing access token or session_id")
+    
+    # Validate token
+    payload = GitHubOAuthService.validate_access_token(access_token)
+    
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid access token")
+    
+    user_login = payload.get("login")
+    
+    # Get session from Firestore
+    session = await firebase_db.get_session(session_id)
+    
+    if not session:
+        raise HTTPException(status_code=401, detail="Session not found")
+    
+    # Verify token matches
+    if session.get("jwt_access_token") != access_token:
+        raise HTTPException(status_code=401, detail="Invalid access token for session")
+    
+    logger.info(f"Dashboard data requested for {user_login}")
+    
+    return {
+        "user": {
+            "id": payload.get("user_id"),
+            "login": user_login,
+            "avatar_url": payload.get("avatar_url"),
+            "email": payload.get("email")
+        },
+        "github_data": session.get("github_data"),
+        "analytics": session.get("analytics"),
+        "insights": session.get("insights"),
+        "last_updated": datetime.utcnow().isoformat()
+    }
+
 
 
 # ============================================================================
@@ -583,20 +880,17 @@ async def debug_config(request: Request):
     
     logger.info(f"Debug config accessed from IP: {request.client.host}")
     
-    # Count active sessions
-    active_sessions = sum(1 for s in sessions_db.values() if s.get("is_valid"))
-    revoked_sessions = sum(1 for s in sessions_db.values() if not s.get("is_valid"))
-    
     return {
         "environment": ENVIRONMENT,
         "github_client_id": GITHUB_CLIENT_ID[:10] + "..." if GITHUB_CLIENT_ID else "not_set",
         "frontend_url": FRONTEND_URL,
-        "active_sessions": active_sessions,
-        "revoked_sessions": revoked_sessions,
+        "firebase_configured": os.path.exists(os.getenv("FIREBASE_CREDENTIALS_PATH", "serviceAccountKey.js")),
         "csrf_states_count": len(csrf_states),
         "https_required": REQUIRE_HTTPS,
         "access_token_lifetime": "15 minutes",
-        "refresh_token_lifetime": "7 days"
+        "refresh_token_lifetime": "7 days",
+        "database": "Firestore (persistent)",
+        "message": "Sessions now stored in Firestore, not in-memory"
     }
 
 
@@ -607,7 +901,7 @@ if __name__ == "__main__":
     logger.info(f"HTTPS Required: {REQUIRE_HTTPS}")
     
     uvicorn.run(
-        "main:app",
+        "auth.main:app",
         host="0.0.0.0",
         port=8000,
         reload=(ENVIRONMENT == "development")

@@ -8,3 +8,7 @@ pyjwt
 slowapi
 python-jose
 uuid6
+google-generativeai
+numpy
+pandas
+firebase-admin
