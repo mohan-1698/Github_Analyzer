@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+python-dotenv
+httpx
+pydantic
+aiohttp
+pyjwt
+slowapi
+python-jose
+uuid6
