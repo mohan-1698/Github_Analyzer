@@ -16,13 +16,36 @@ SECURITY:
 
 import firebase_admin
 from firebase_admin import credentials, firestore
-from datetime import datetime, timedelta
-from typing import Optional, Dict
+from datetime import datetime, timedelta, date
+from typing import Optional, Dict, Any
 import logging
 import os
 import asyncio
+import json
 
 logger = logging.getLogger("firebase_service")
+
+
+def serialize_for_firestore(obj: Any) -> Any:
+    """
+    Recursively convert datetime/date objects to ISO strings and ensure all keys are strings.
+    Handles nested dicts and lists. Firestore requires all keys to be non-empty strings.
+    """
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    elif isinstance(obj, date):
+        return obj.isoformat()
+    elif isinstance(obj, dict):
+        # Convert all keys to strings and filter out empty keys
+        return {
+            str(k): serialize_for_firestore(v) 
+            for k, v in obj.items() 
+            if str(k).strip()  # Skip empty keys
+        }
+    elif isinstance(obj, list):
+        return [serialize_for_firestore(item) for item in obj]
+    else:
+        return obj
 
 # Timeout configuration
 FIREBASE_TIMEOUT = 3.0
@@ -51,7 +74,6 @@ class FirebaseManager:
             # Check if Firebase already initialized
             if firebase_admin._apps:
                 self._db = firestore.client()
-                logger.info("Firebase already initialized, using existing connection")
             else:
                 # Initialize with service account key
                 cred_path = os.getenv("FIREBASE_CREDENTIALS_PATH", "serviceAccountKey.json")
@@ -62,10 +84,8 @@ class FirebaseManager:
                 cred = credentials.Certificate(cred_path)
                 firebase_admin.initialize_app(cred)
                 self._db = firestore.client()
-                logger.info("Firebase initialized successfully")
         
         except Exception as e:
-            logger.error(f"Failed to initialize Firebase: {str(e)}")
             raise
     
     @property
@@ -90,34 +110,33 @@ class FirebaseManager:
         """
         # Input validation
         if not session_id or not isinstance(session_data, dict):
-            logger.warning(f"Invalid session data: session_id={session_id}, data_type={type(session_data)}")
             return False
         
         for attempt in range(MAX_RETRIES + 1):
             try:
-                logger.info(f"Saving session {session_id} to Firestore (attempt {attempt + 1})...")
-                session_data["created_at"] = datetime.utcnow()
-                session_data["expires_at"] = datetime.utcnow() + timedelta(days=7)
+                # Convert datetime to ISO string for Firestore compatibility
+                session_clean = serialize_for_firestore(session_data)
+                session_clean["created_at"] = datetime.utcnow().isoformat()
+                session_clean["expires_at"] = (datetime.utcnow() + timedelta(days=7)).isoformat()
+                
+                # Capture variables before lambda to avoid closure issues
+                sid = str(session_id)
+                data = session_clean
                 
                 await asyncio.wait_for(
                     asyncio.to_thread(
-                        lambda: self._db.collection("sessions").document(session_id).set(session_data)
+                        lambda s=sid, d=data: self._db.collection("sessions").document(s).set(d)
                     ),
                     timeout=FIREBASE_TIMEOUT
                 )
-                logger.info(f"Session {session_id} saved successfully!")
                 return True
             
             except asyncio.TimeoutError:
-                logger.warning(f"Firestore timeout on attempt {attempt + 1} for session {session_id}")
                 if attempt < MAX_RETRIES:
                     await asyncio.sleep(1)
                     continue
-                logger.error(f"Failed to save session {session_id} after {attempt + 1} attempts (timeout)")
                 return False
             except Exception as e:
-                logger.error(f"Error saving session {session_id} on attempt {attempt + 1}: {str(e)}")
-                logger.error(f"Exception type: {type(e).__name__}")
                 if attempt < MAX_RETRIES:
                     await asyncio.sleep(1)
                     continue
@@ -137,30 +156,26 @@ class FirebaseManager:
         """
         # Input validation
         if not session_id or not isinstance(session_id, str):
-            logger.warning(f"Invalid session_id: {session_id}, type: {type(session_id)}")
             return None
         
         try:
-            logger.info(f"Retrieving session from Firestore: {session_id}")
+            # Capture variable before lambda to avoid closure issues
+            sid = str(session_id)
+            
             doc = await asyncio.wait_for(
                 asyncio.to_thread(
-                    lambda: self._db.collection("sessions").document(session_id).get()
+                    lambda s=sid: self._db.collection("sessions").document(s).get()
                 ),
                 timeout=FIREBASE_TIMEOUT
             )
             
             if doc.exists:
-                logger.info(f"Session {session_id} found with data")
                 return doc.to_dict()
-            logger.warning(f"Session {session_id} does not exist in Firestore")
             return None
         
         except asyncio.TimeoutError:
-            logger.error(f"Firestore timeout while retrieving session {session_id}")
             return None
         except Exception as e:
-            logger.error(f"Error retrieving session {session_id}: {str(e)}")
-            logger.error(f"Exception type: {type(e).__name__}")
             return None
     
     async def update_session(self, session_id: str, updates: dict) -> bool:
@@ -180,11 +195,17 @@ class FirebaseManager:
         
         for attempt in range(MAX_RETRIES + 1):
             try:
-                updates["updated_at"] = datetime.utcnow()
+                # Convert datetime to ISO string for Firestore compatibility
+                updates_clean = serialize_for_firestore(updates)
+                updates_clean["updated_at"] = datetime.utcnow().isoformat()
+                
+                # Capture variables before lambda to avoid closure issues
+                sid = str(session_id)
+                data = updates_clean
                 
                 await asyncio.wait_for(
                     asyncio.to_thread(
-                        lambda: self._db.collection("sessions").document(session_id).update(updates)
+                        lambda s=sid, d=data: self._db.collection("sessions").document(s).update(d)
                     ),
                     timeout=FIREBASE_TIMEOUT
                 )
@@ -349,12 +370,11 @@ class FirebaseManager:
                 count += 1
             
             if count > 0:
-                logger.info(f"Cleaned up {count} expired sessions")
+                pass
             
             return count
         
         except Exception as e:
-            logger.error(f"Error cleaning up expired sessions: {str(e)}")
             return 0
     
     # ========================================================================
@@ -378,14 +398,20 @@ class FirebaseManager:
         
         for attempt in range(MAX_RETRIES + 1):
             try:
-                user_data["updated_at"] = datetime.utcnow()
+                # Convert datetime to ISO string for Firestore compatibility
+                user_clean = serialize_for_firestore(user_data)
+                user_clean["updated_at"] = datetime.utcnow().isoformat()
                 
-                if not user_data.get("created_at"):
-                    user_data["created_at"] = datetime.utcnow()
+                if not user_clean.get("created_at"):
+                    user_clean["created_at"] = datetime.utcnow().isoformat()
+                
+                # Capture variables before lambda to avoid closure issues
+                uid = str(user_id)
+                data = user_clean
                 
                 await asyncio.wait_for(
                     asyncio.to_thread(
-                        lambda: self._db.collection("users").document(user_id).set(user_data, merge=True)
+                        lambda u=uid, d=data: self._db.collection("users").document(u).set(d, merge=True)
                     ),
                     timeout=FIREBASE_TIMEOUT
                 )
@@ -420,9 +446,12 @@ class FirebaseManager:
         
         for attempt in range(MAX_RETRIES + 1):
             try:
+                # Capture user_id before lambda to avoid closure issues
+                uid = str(user_id)
+                
                 doc = await asyncio.wait_for(
                     asyncio.to_thread(
-                        lambda: self._db.collection("users").document(user_id).get()
+                        lambda u=uid: self._db.collection("users").document(u).get()
                     ),
                     timeout=FIREBASE_TIMEOUT
                 )
@@ -447,51 +476,29 @@ class FirebaseManager:
     # ========================================================================
     
     async def save_analytics(self, user_id: str, analytics_data: dict) -> bool:
-        """
-        Save analytics snapshot for user with timeout and retry
-        
-        Args:
-            user_id: User identifier
-            analytics_data: Analytics dict
-        
-        Returns:
-            True if successful
-        """
-        # Input validation
+        """Save analytics for user inside users collection"""
         if not user_id or not isinstance(analytics_data, dict):
             return False
         
-        for attempt in range(MAX_RETRIES + 1):
-            try:
-                doc_id = f"{user_id}_{datetime.utcnow().strftime('%Y-%m-%d')}"
-                
-                analytics_data["user_id"] = user_id
-                analytics_data["calculated_at"] = datetime.utcnow()
-                
-                await asyncio.wait_for(
-                    asyncio.to_thread(
-                        lambda: self._db.collection("analytics").document(doc_id).set(analytics_data, merge=True)
-                    ),
-                    timeout=FIREBASE_TIMEOUT
-                )
-                return True
+        try:
+            user_id_str = str(user_id)
+            analytics_clean = serialize_for_firestore(analytics_data)
+            analytics_clean["calculated_at"] = datetime.utcnow().isoformat()
             
-            except asyncio.TimeoutError:
-                if attempt < MAX_RETRIES:
-                    await asyncio.sleep(1)
-                    continue
-                return False
-            except Exception:
-                if attempt < MAX_RETRIES:
-                    await asyncio.sleep(1)
-                    continue
-                return False
-        
-        return False
+            await asyncio.to_thread(
+                lambda uid=user_id_str, data=analytics_clean: self._db.collection("users").document(uid).set(
+                    {"analytics": data, "updated_at": datetime.utcnow().isoformat()},
+                    merge=True
+                )
+            )
+            return True
+            
+        except Exception as e:
+            return False
     
     async def get_latest_analytics(self, user_id: str) -> Optional[Dict]:
         """
-        Get most recent analytics for user with timeout and retry
+        Get latest analytics for user from users collection
         
         Args:
             user_id: User identifier
@@ -505,19 +512,19 @@ class FirebaseManager:
         
         for attempt in range(MAX_RETRIES + 1):
             try:
-                docs = await asyncio.wait_for(
+                # Capture user_id before lambda to avoid closure issues
+                uid = str(user_id)
+                
+                doc = await asyncio.wait_for(
                     asyncio.to_thread(
-                        lambda: list(self._db.collection("analytics")
-                                     .where("user_id", "==", user_id)
-                                     .order_by("calculated_at", direction=firestore.Query.DESCENDING)
-                                     .limit(1)
-                                     .stream())
+                        lambda u=uid: self._db.collection("users").document(u).get()
                     ),
                     timeout=FIREBASE_TIMEOUT
                 )
                 
-                if docs:
-                    return docs[0].to_dict()
+                if doc.exists:
+                    user_data = doc.to_dict()
+                    return user_data.get("analytics")
                 
                 return None
             
@@ -539,51 +546,29 @@ class FirebaseManager:
     # ========================================================================
     
     async def save_insights(self, user_id: str, insights_data: dict) -> bool:
-        """
-        Save AI insights for user with timeout and retry
-        
-        Args:
-            user_id: User identifier
-            insights_data: Insights dict
-        
-        Returns:
-            True if successful
-        """
-        # Input validation
+        """Save AI insights for user inside users collection"""
         if not user_id or not isinstance(insights_data, dict):
             return False
         
-        for attempt in range(MAX_RETRIES + 1):
-            try:
-                doc_id = f"{user_id}_{datetime.utcnow().strftime('%Y-%m-%d')}"
-                
-                insights_data["user_id"] = user_id
-                insights_data["generated_at"] = datetime.utcnow()
-                
-                await asyncio.wait_for(
-                    asyncio.to_thread(
-                        lambda: self._db.collection("insights").document(doc_id).set(insights_data, merge=True)
-                    ),
-                    timeout=FIREBASE_TIMEOUT
-                )
-                return True
+        try:
+            user_id_str = str(user_id)
+            insights_clean = serialize_for_firestore(insights_data)
+            insights_clean["generated_at"] = datetime.utcnow().isoformat()
             
-            except asyncio.TimeoutError:
-                if attempt < MAX_RETRIES:
-                    await asyncio.sleep(1)
-                    continue
-                return False
-            except Exception:
-                if attempt < MAX_RETRIES:
-                    await asyncio.sleep(1)
-                    continue
-                return False
-        
-        return False
+            await asyncio.to_thread(
+                lambda uid=user_id_str, data=insights_clean: self._db.collection("users").document(uid).set(
+                    {"insights": data, "updated_at": datetime.utcnow().isoformat()},
+                    merge=True
+                )
+            )
+            return True
+            
+        except Exception as e:
+            return False
     
     async def get_latest_insights(self, user_id: str) -> Optional[Dict]:
         """
-        Get most recent insights for user with timeout and retry
+        Get latest insights for user from users collection
         
         Args:
             user_id: User identifier
@@ -597,19 +582,19 @@ class FirebaseManager:
         
         for attempt in range(MAX_RETRIES + 1):
             try:
-                docs = await asyncio.wait_for(
+                # Capture user_id before lambda to avoid closure issues
+                uid = str(user_id)
+                
+                doc = await asyncio.wait_for(
                     asyncio.to_thread(
-                        lambda: list(self._db.collection("insights")
-                                     .where("user_id", "==", user_id)
-                                     .order_by("generated_at", direction=firestore.Query.DESCENDING)
-                                     .limit(1)
-                                     .stream())
+                        lambda u=uid: self._db.collection("users").document(u).get()
                     ),
                     timeout=FIREBASE_TIMEOUT
                 )
                 
-                if docs:
-                    return docs[0].to_dict()
+                if doc.exists:
+                    user_data = doc.to_dict()
+                    return user_data.get("insights")
                 
                 return None
             

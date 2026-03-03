@@ -91,7 +91,6 @@ class AnalyticsEngine:
                     date = datetime.fromisoformat(commit_date_str.replace("Z", "+00:00")).date()
                     commit_dates.add(date)
             except Exception as e:
-                logger.warning(f"Error parsing date in streak: {str(e)}")
                 continue
         
         if not commit_dates:
@@ -213,7 +212,7 @@ class AnalyticsEngine:
                     merge_time = (closed - created).days
                     merge_times.append(merge_time)
                 except Exception as e:
-                    logger.warning(f"Error calculating merge time: {str(e)}")
+                    pass
             else:
                 open_prs += 1
         
@@ -301,10 +300,7 @@ class AnalyticsEngine:
     @staticmethod
     def aggregate_all_metrics(commits: List[Dict], repos: List[Dict], 
                             pull_requests: List[Dict]) -> Dict:
-        """
-        Calculate all metrics and aggregate, including repo list for AI analysis
-        """
-        logger.info("Aggregating all metrics")
+        """Calculate all metrics and aggregate, including repo list for AI analysis"""
         
         return {
             "commits": AnalyticsEngine.calculate_commit_metrics(commits),

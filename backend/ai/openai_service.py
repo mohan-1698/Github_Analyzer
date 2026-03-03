@@ -31,8 +31,8 @@ import hashlib
 logger = logging.getLogger("gemini_service")
 
 # Gemini timeout (AI takes longer than regular API calls)
-GEMINI_TIMEOUT = 10.0
-MAX_RETRIES = 1
+GEMINI_TIMEOUT = 60.0
+MAX_RETRIES = 2
 
 
 class GeminiService:
@@ -54,6 +54,14 @@ class GeminiService:
         
         # Extract key metrics
         repos = metrics.get("repositories", [])
+        
+        # Type safety: ensure repos is a list of dicts
+        if not isinstance(repos, list):
+            repos = []
+        else:
+            # Filter to keep only dict items (remove non-dict entries)
+            repos = [r for r in repos if isinstance(r, dict)]
+        
         commits_data = metrics.get("commits", {})
         total_commits = commits_data.get("total_commits", 0)
         commits_per_day = commits_data.get("commits_per_day", 0)
@@ -62,16 +70,31 @@ class GeminiService:
         merged_prs = metrics.get("prs", {}).get("merged_prs", 0)
         productivity_score = metrics.get("productivity", {}).get("score", 0)
         languages = metrics.get("languages", {})
+        # Get the language distribution dict (percentages)
+        lang_distribution = languages.get("language_distribution", {}) if isinstance(languages, dict) else {}
+        primary_language = languages.get("primary_language", "Unknown") if isinstance(languages, dict) else "Unknown"
         
-        # Top repos by stars
-        top_repos = sorted(repos, key=lambda x: x.get("stargazers_count", 0), reverse=True)[:8]
+        # Top repos by stars - with safe sorting
+        try:
+            top_repos = sorted(
+                [r for r in repos if isinstance(r, dict)],
+                key=lambda x: int(x.get("stargazers_count", 0)) if isinstance(x.get("stargazers_count"), (int, float)) else 0,
+                reverse=True
+            )[:8]
+        except Exception as sort_error:
+            top_repos = []
+        
         repo_summary = "\n".join([
-            f"- {r['name']}: ⭐{r.get('stargazers_count', 0)}, {r.get('language', 'Unknown')}"
+            f"- {r.get('name', 'Unknown')}: ⭐{r.get('stargazers_count', 0)}, {r.get('language', 'Unknown')}"
             for r in top_repos
         ])
         
-        # Languages distribution
-        lang_summary = ", ".join([f"{k}: {v}%" for k, v in sorted(languages.items(), key=lambda x: x[1], reverse=True)[:5]]) if languages else "N/A"
+        # Languages distribution - use the extracted distribution dict
+        try:
+            lang_items = list(lang_distribution.items())
+            lang_summary = ", ".join([f"{k}: {v}%" for k, v in sorted(lang_items, key=lambda x: x[1], reverse=True)[:5]]) if lang_items else "N/A"
+        except Exception as e:
+            lang_summary = "N/A"
         
         prompt = f"""Analyze GitHub developer profile: {user_login}
 
@@ -87,54 +110,89 @@ PROFILE METRICS:
 TOP REPOSITORIES:
 {repo_summary}
 
-COMMIT ANALYSIS:
-- Average commits/month: {total_commits / 12:.1f}
-- Commits this week: {commits_this_week}
-- Contribution consistency: {"Excellent" if commits_per_day > 1 else "Good" if commits_per_day > 0.5 else "Moderate"}
-
-GENERATE JSON WITH EXACTLY THESE 12 FIELDS (NO ADDITIONAL FIELDS):
+GENERATE JSON WITH EXACTLY THESE FIELDS (MATCH STRUCTURE EXACTLY):
 
 {{
-    "developer_level": "Beginner/Junior/Mid-level/Senior/Expert. Based: repo count ({len(repos)}), commit frequency ({commits_per_day:.1f}/day), streak ({longest_streak}d), language mastery, project complexity",
+    "developer_level": "Beginner/Junior/Mid-level/Senior/Expert",
     
-    "primary_domains": ["List 2-3 main specializations with % breakdown based on: language mix ({lan_summary}), project types, repository diversity"],
+    "primary_domains": ["Web Development - 60%", "Data Science - 30%", "DevOps - 10%"],
     
-    "top_repositories_used": ["List 5-8 most important repos with: name, role (architect/owner/core-contributor), key tech, impact on profile"],
+    "top_repositories_used": ["repo1: Main project with React, TypeScript", "repo2: Backend API with Python", "repo3: ML experiments"],
     
     "activity_analysis": {{
-        "commit_pattern": "Frequency description based on {commits_per_day:.1f}/day and {longest_streak}d streak",
-        "most_active_repo": "Name and reasoning from top repos",
-        "frequency_score": "0-100 based on {total_commits} total commits and {commits_this_week} this week",
-        "consistency_insight": "Daily/weekly/monthly developer or sprint-based?"
+        "efficiency_rating": "High/Medium/Low - brief explanation",
+        "consistency": "Daily coder/Weekly sprinter/Monthly bursts",
+        "weekly_output": "~X commits per week on average",
+        "pattern": "Regular contributor/Sprint-based/Variable"
     }},
     
-    "core_strengths": ["List 5-7 technical strengths from: language expertise, project diversity, code patterns, domains covered"],
+    "core_strengths": ["Strong JavaScript/TypeScript skills", "Full-stack development experience", "Good commit discipline"],
     
-    "areas_to_improve": ["List 4-5 gaps from: missing languages, untried project types, collaboration patterns, testing practices"],
+    "areas_to_improve": {{
+        "technical_gaps": ["Need more testing coverage", "Could improve TypeScript usage"],
+        "activity_concerns": ["Long inactive periods between sprints"],
+        "domain_specific": ["Consider exploring cloud infrastructure", "Add more documentation"]
+    }},
     
-    "coding_discipline_explained": "Code organization assessment: branch discipline, commit message quality, refactoring patterns, documentation. Rate (excellent/good/moderate/needs-work)",
+    "coding_discipline_explained": {{
+        "rating": "Excellent/Good/Moderate/Needs Work",
+        "meaning": "What this means for code quality",
+        "evidence": "Based on commit patterns and repo structure",
+        "why_matters": "Impact on team collaboration",
+        "improvement": "Specific tip to improve"
+    }},
     
-    "focus_style_explained": "Developer archetype: Specialist (deep in 1-2 domains) / Generalist (broad skills) / Full-stack / DevOps-focused / Data-focused. Explain concentration",
+    "focus_style_explained": {{
+        "style": "Specialist/Generalist/Full-stack/DevOps-focused",
+        "meaning": "What this style indicates",
+        "evidence": "Based on repo diversity and languages",
+        "career_implications": "Career path suggestions",
+        "recommendation": "How to leverage this style"
+    }},
     
-    "growth_opportunities": ["List 5-6 specific opportunities: new tech stacks, frameworks, domains, OSS areas, leadership paths"],
+    "growth_opportunities": {{
+        "next_skills": ["TypeScript advanced patterns", "GraphQL", "Kubernetes"],
+        "project_ideas": ["Build a real-time app", "Contribute to OSS", "Create a CLI tool"]
+    }},
     
     "burnout_risk_assessment": {{
-        "risk_level": "Low/Moderate/High based on: {commits_per_day:.1f}/day frequency, {longest_streak}d consistency, inactive periods",
-        "indicators": ["Specific patterns: regular/sporadic/declining/intense"],
-        "recommendations": ["3-4 sustainable practices"]
+        "risk_level": "Low/Medium/High",
+        "explanation": "Based on commit frequency and patterns",
+        "if_low": "Your pace is sustainable",
+        "if_medium": "Monitor your workload",
+        "if_high": "Consider taking breaks",
+        "recommendation": "Specific advice for sustainability"
     }},
     
-    "learning_roadmap": ["5-8 learning goals ranked by priority: technologies, methodologies, frameworks, domains, roles. Include 3/6/12 month timeline"],
+    "learning_roadmap": {{
+        "current_domain": "Primary specialization area",
+        "domain_mastery_level": "Beginner/Intermediate/Advanced/Expert",
+        "phase_1_months_1_2": {{
+            "domain": "Focus area",
+            "goal": "Specific measurable goal",
+            "why": "Reason for this focus"
+        }},
+        "phase_2_months_3_4": {{
+            "domain": "Complementary area",
+            "goal": "Specific measurable goal",
+            "why": "Reason for this focus"
+        }},
+        "phase_3_months_5_6": {{
+            "domain": "Stretch goal area",
+            "goal": "Specific measurable goal",
+            "why": "Reason for this focus"
+        }},
+        "implementation": ["Weekly learning hours", "Resources to use", "Practice projects"]
+    }},
     
-    "comprehensive_assessment": "2-3 paragraph summary: overall profile strength, unique value proposition, market positioning, 1-2 year trajectory, key differentiators, honest assessment"
+    "comprehensive_assessment": "2-3 paragraph personalized summary covering: current level assessment, unique strengths, growth trajectory, market positioning, and honest constructive feedback. Reference actual metrics like {total_commits} commits, {len(repos)} repos, {longest_streak}d streak."
 }}
 
 CRITICAL:
-- Return VALID JSON ONLY - no markdown/code blocks
-- ALL 12 fields MUST be present
-- Strings are descriptive (50-200 words)
-- Data-driven: reference actual metrics
-- Honest, constructive, personalized"""
+- Return VALID JSON ONLY - no markdown/code blocks/backticks
+- Match the EXACT field names and nesting structure above
+- Be personalized and data-driven using the actual metrics provided
+- Be honest and constructive"""
         
         return prompt
     
@@ -155,23 +213,23 @@ CRITICAL:
     
     @staticmethod
     def validate_ai_response(response_text: str) -> Optional[Dict]:
-        """
-        SECURITY: Validate and parse AI response as JSON with expanded fields
-        Lenient validation - accepts partial responses, logs everything
-        """
+        """SECURITY: Validate and parse AI response as JSON"""
         try:
-            # Log the raw response for debugging - show full response
-            logger.info(f"Raw Gemini response ({len(response_text)} chars):")
-            logger.info(response_text)  # Log FULL response
+            # Strip markdown code blocks if present
+            clean_text = response_text.strip()
+            if clean_text.startswith("```json"):
+                clean_text = clean_text[7:]
+            elif clean_text.startswith("```"):
+                clean_text = clean_text[3:]
+            if clean_text.endswith("```"):
+                clean_text = clean_text[:-3]
+            clean_text = clean_text.strip()
             
-            # SECURITY: Try to parse JSON
-            response_json = json.loads(response_text)
+            # Parse JSON
+            response_json = json.loads(clean_text)
             
-            logger.info(f"Successfully parsed JSON with {len(response_json)} fields: {list(response_json.keys())}")
-            
-            # Accept any response that has at least some fields
+            # Accept any response that has fields
             if not response_json or not isinstance(response_json, dict):
-                logger.warning("Response is not a valid dict")
                 return None
             
             # Validate array fields contain strings (if present)
@@ -186,7 +244,6 @@ CRITICAL:
             for field in array_fields:
                 if field in response_json:
                     if not isinstance(response_json.get(field), list):
-                        logger.warning(f"{field} not a list, converting")
                         response_json[field] = []
                     else:
                         # Filter to keep only strings
@@ -194,7 +251,6 @@ CRITICAL:
                             str(item) for item in response_json[field] 
                             if isinstance(item, (str, dict))
                         ]
-                        logger.info(f"{field}: {len(response_json[field])} items")
             
             # Validate personalized_development_plan structure (if present)
             if "personalized_development_plan" in response_json:
@@ -205,49 +261,32 @@ CRITICAL:
                         if isinstance(item, dict) and "month" in item and "focus" in item:
                             fixed_plan.append(item)
                     response_json["personalized_development_plan"] = fixed_plan
-                    logger.info(f"Development plan: {len(fixed_plan)} months")
                 else:
                     response_json["personalized_development_plan"] = []
             
-            logger.info("AI response validated successfully")
-            logger.info(f"Final response has {len(response_json)} fields")
             return response_json
         
         except json.JSONDecodeError as e:
-            logger.error(f"JSON decode error: {str(e)}")
-            logger.error(f"Response text: {response_text}")
             return None
         except Exception as e:
-            logger.error(f"Error validating AI response: {str(e)}")
-            logger.error(f"Response text: {response_text}")
             return None
     
     async def generate_insights(self, metrics: Dict, user_login: str, cached_insights: Optional[Dict] = None, previous_hash: Optional[str] = None) -> Optional[Dict]:
-        """
-        Generate AI insights from metrics with timeout and retry
-        SMART CACHING: Reuse cached insights if data hash matches
-        SECURITY: Uses structured prompts, validates output, timeout protection
-        """
+        """Generate AI insights from metrics with timeout and retry"""
         # Input validation
         if not isinstance(metrics, dict) or not user_login:
-            logger.error("Invalid metrics or user_login")
             return None
         
         # Check if data changed
         current_hash = self.get_analytics_hash(metrics)
         if cached_insights and previous_hash and current_hash == previous_hash:
-            logger.info(f"Analytics unchanged (hash: {current_hash}). Returning cached insights.")
             return cached_insights
-        
-        logger.info(f"Generating insights for user: {user_login} (hash: {current_hash})")
         
         # Build prompt
         prompt = GeminiService.build_insights_prompt(metrics, user_login)
         
         for attempt in range(MAX_RETRIES + 1):
             try:
-                logger.info(f"Calling Gemini API (attempt {attempt + 1})...")
-                
                 # Call Gemini with timeout
                 response_text = await asyncio.wait_for(
                     asyncio.to_thread(
@@ -257,33 +296,26 @@ CRITICAL:
                     timeout=GEMINI_TIMEOUT
                 )
                 
-                logger.info(f"Gemini response received: {len(response_text)} chars")
-                
                 # SECURITY: Validate response format
                 insights = GeminiService.validate_ai_response(response_text)
                 
                 if insights:
                     insights["generated_at"] = datetime.utcnow().isoformat()
                     insights["model"] = "google-gemini-pro"
-                    insights["analytics_hash"] = current_hash  # Store hash for next time
-                    logger.info(f"Insights generated successfully for {user_login}")
+                    insights["analytics_hash"] = current_hash
                     return insights
                 elif attempt < MAX_RETRIES:
-                    logger.warning(f"Invalid insights response, retrying... (attempt {attempt + 1})")
                     await asyncio.sleep(1)
                     continue
                 else:
-                    logger.error(f"Invalid insights response after {attempt + 1} attempts")
                     return None
             
             except asyncio.TimeoutError:
-                logger.error(f"Gemini API timeout on attempt {attempt + 1}")
                 if attempt < MAX_RETRIES:
                     await asyncio.sleep(1)
                     continue
                 return None
             except Exception as e:
-                logger.error(f"Error calling Gemini: {str(e)}")
                 if attempt < MAX_RETRIES:
                     await asyncio.sleep(1)
                     continue
@@ -294,7 +326,6 @@ CRITICAL:
     def _call_gemini(self, prompt: str) -> str:
         """Helper method to call Gemini (blocks, so wrapped in asyncio.to_thread)"""
         try:
-            logger.info("Sending request to Gemini API...")
             response = self.model.generate_content(
                 prompt,
                 generation_config=genai.types.GenerationConfig(
@@ -302,10 +333,8 @@ CRITICAL:
                     # No token limit - let Gemini return full response
                 )
             )
-            logger.info(f"Gemini API returned: {len(response.text)} chars, first 200: {response.text[:200]}...")
             return response.text.strip()
         except Exception as e:
-            logger.error(f"Gemini API error: {str(e)}")
             raise
 
 
