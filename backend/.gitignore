@@ -1,0 +1,86 @@
+### PYTHON ###
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+htmlcov/
+
+### VIRTUAL ENVIRONMENT ###
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+.venv
+.venv/
+
+### DJANGO ###
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+### FLASK ###
+instance/
+.webassets-cache
+
+### FASTAPI/UVICORN ###
+*.pid
+*.sock
+
+### ENVIRONMENT ###
+.env
+.env.local
+.env.*.local
+
+### IDE ###
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-workspace
+
+### OS ###
+.DS_Store
+Thumbs.db
+
+### LOGS ###
+*.log
+logs/
+audit/
+auth_audit.log
+
+### TEMP ###
+*.tmp
+*.bak
+~*
+.cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+serviceAccountKey.json
+*.pem
+*.key

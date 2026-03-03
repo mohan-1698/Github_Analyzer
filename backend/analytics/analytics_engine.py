@@ -29,9 +29,10 @@ class AnalyticsEngine:
     @staticmethod
     def calculate_commit_metrics(commits: List[Dict]) -> Dict:
         """
-        Calculate commit-based metrics
+        Calculate commit-based metrics with input validation
         """
-        if not commits:
+        # Input validation
+        if not commits or not isinstance(commits, list):
             return {
                 "total_commits": 0,
                 "commits_per_day": 0,
@@ -46,16 +47,17 @@ class AnalyticsEngine:
         for commit in commits:
             # SECURITY: Handle various date formats
             try:
+                if not isinstance(commit, dict):
+                    continue
                 commit_date_str = commit.get("commit", {}).get("committer", {}).get("date")
                 if commit_date_str:
                     date = datetime.fromisoformat(commit_date_str.replace("Z", "+00:00")).date()
                     commits_by_date[date] += 1
-            except Exception as e:
-                logger.warning(f"Error parsing commit date: {str(e)}")
+            except Exception:
                 continue
         
-        # Calculate stats
-        num_active_days = len(commits_by_date)
+        # Calculate stats (safe division)
+        num_active_days = len(commits_by_date) if commits_by_date else 1
         num_weeks = max(num_active_days / 7, 1)
         num_months = max(num_active_days / 30, 1)
         
@@ -140,19 +142,25 @@ class AnalyticsEngine:
     @staticmethod
     def calculate_language_distribution(repos: List[Dict]) -> Dict:
         """
-        Calculate which languages user codes in most
+        Calculate which languages user codes in most with input validation
         """
-        if not repos:
+        # Input validation
+        if not repos or not isinstance(repos, list):
             return {"primary_language": "Unknown", "language_distribution": {}}
         
         language_bytes = defaultdict(int)
         
         for repo in repos:
-            language = repo.get("language")
-            size = repo.get("size", 0)
-            
-            if language:
-                language_bytes[language] += size
+            try:
+                if not isinstance(repo, dict):
+                    continue
+                language = repo.get("language")
+                size = repo.get("size", 0)
+                
+                if language and isinstance(size, int) and size >= 0:
+                    language_bytes[language] += size
+            except Exception:
+                continue
         
         if not language_bytes:
             return {"primary_language": "Unknown", "language_distribution": {}}
@@ -161,8 +169,8 @@ class AnalyticsEngine:
         sorted_languages = sorted(language_bytes.items(), key=lambda x: x[1], reverse=True)
         primary = sorted_languages[0][0]
         
-        # Calculate percentages
-        total_bytes = sum(language_bytes.values())
+        # Calculate percentages (safe division)
+        total_bytes = sum(language_bytes.values()) or 1
         distribution = {
             lang: round((bytes / total_bytes * 100), 2)
             for lang, bytes in sorted_languages
@@ -294,7 +302,7 @@ class AnalyticsEngine:
     def aggregate_all_metrics(commits: List[Dict], repos: List[Dict], 
                             pull_requests: List[Dict]) -> Dict:
         """
-        Calculate all metrics and aggregate
+        Calculate all metrics and aggregate, including repo list for AI analysis
         """
         logger.info("Aggregating all metrics")
         
@@ -308,5 +316,6 @@ class AnalyticsEngine:
                 "streaks": AnalyticsEngine.calculate_streaks(commits),
                 "languages": AnalyticsEngine.calculate_language_distribution(repos),
                 "prs": AnalyticsEngine.calculate_pr_metrics(pull_requests)
-            })
+            }),
+            "repositories": repos if repos else []  # Pass repo list for AI analysis
         }

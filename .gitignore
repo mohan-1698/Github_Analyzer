@@ -1,6 +1,43 @@
-backend/.env
-backend/serviceAccountKey.json
-backend/__pycache__/
-backend/.venv/
-backend/venv/
+### ENVIRONMENT VARIABLES ###
+.env
+.env.local
+.env.*.local
+.env.*.loca
 
+### IDE & EDITOR ###
+.vscode/
+.idea/
+*.swp
+*.swo
+*.vim
+*.sublime-workspace
+.DS_Store
+Thumbs.db
+.project
+.pydevproject
+
+### OS ###
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+desktop.ini
+
+### Logs ###
+*.log
+logs/
+debug/
+auth_audit.log
+
+### Temp files ###
+*.tmp
+*.temp
+*.bak
+*.backup
+*~
+
+### System ###
+.TemporaryItems
+.VolumeIcon.icns
