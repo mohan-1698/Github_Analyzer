@@ -289,7 +289,6 @@ class GitHubOAuthService:
             return None
         
         return payload
-        return payload
     
     @staticmethod
     def validate_refresh_token(token: str) -> Optional[dict]:
